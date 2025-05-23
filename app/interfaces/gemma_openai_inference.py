@@ -1,67 +1,70 @@
 import os
 from openai import OpenAI
 from app.logger import logger
-import json
-import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
+from pydantic import BaseModel, Field
+from enum import Enum
 
-OPENAI_BASE_URL = os.getenv("RUNPOD_GEMMA_BASE_URL")
-MODEL_NAME = os.getenv("RUNPOD_GEMMA_MODEL")
-API_KEY = os.getenv("RUNPOD_API_KEY")
-MAX_TOKENS = int(os.getenv("GEMMA_MAX_TOKENS"))
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+MODEL_NAME = os.getenv("OPENAI_MODEL")
+API_KEY = os.getenv("OPENAI_API_TOKEN")
 
 
-logger.debug(f"Connecting to Gemma OpenAI client with creds:\n BASE_URL: {OPENAI_BASE_URL},\n API_KEY: {API_KEY},\n MODEL_NAME: {MODEL_NAME},\n GEMMA_MAX_TOKENS: {MAX_TOKENS}")
+logger.debug(f"Connecting to Gemma OpenAI client with creds:\n BASE_URL: {OPENAI_BASE_URL},\n API_KEY: {API_KEY},\n MODEL_NAME: {MODEL_NAME}")
 client = OpenAI(
     base_url=OPENAI_BASE_URL,
     api_key=API_KEY,
 )
 
-def try_fix_partial_json(text: str) -> Optional[dict]:
+class VibeName(str, Enum):
+    COZY_AND_INTIMATE = "Cozy and Intimate"
+    ENERGETIC_AND_PARTY = "Energetic and Party"
+    MINIMAL_AND_AESTHETIC = "Minimal and Aesthetic"
+    BOHEMIAN_AND_CREATIVE = "Bohemian and Creative"
+    PREMIUM_AND_LUXURIOUS = "Premium and Luxurious"
+    ACTIVE_AND_SPORTY = "Active and Sporty"
+    FAMILY_AND_FRIENDLY = "Family and Friendly"
+    UNKNOWN = "unknown"
+
+class VibesResponse(BaseModel):
+    """Структурированный ответ LLM."""
+    vibes: List[VibeName] = Field(
+        ...,
+        description=(
+            "Список выявленных вайбов. Допустимые значения см. VibeName Enum."
+        ),
+    )
+
+
+def get_llm_response(prompt: str, image_urls: List[str]) -> Optional[Dict[str, Any]]:
+    user_content: List[dict] = [{"type": "input_text", "text": prompt}]
+    user_content += [
+        {"type": "input_image", "image_url": url} for url in image_urls
+    ]
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты — специалист по внешности. Отвечай *строго* JSON-объектом "
+                'формы {"vibes": ["..."]} без пояснений.'
+            ),
+        },
+        {"role": "user", "content": user_content},
+    ]
+
     try:
-        last = text.rfind("}")
-        if last != -1:
-            return json.loads(text[:last + 1])
-    except Exception:
-        pass
-    return None
+        logger.info("Запрос ChatGPT с structured_output…")
 
+        response = client.responses.parse(
+                model=MODEL_NAME,
+                input=messages,
+                text_format=VibesResponse
+            ).output_parsed
 
-def get_llm_response(prompt: str) -> Optional[Dict[str, Any]]:
-    try:
-        messages = [
-            {"role": "system", "content": "Ты — специалист по внешности. Работай строго в JSON."},
-            {"role": "user", "content": prompt}
-        ]
+        logger.debug("Parsed response: %s", response)
+        return response
 
-        logger.info("Отправка запроса в Gemma RunPod (OpenAI API mode)...")
-
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=0.3,
-            top_p=0.8,
-            max_tokens=MAX_TOKENS,
-        )
-
-        logger.debug(f"RunPod Gemma response: {response}")
-        content = response.choices[0].message.content
-        logger.debug(f"RunPod Gemma OpenAI ответ: {content}")
-
-        if content.startswith("```json"):
-            content = content[7:].strip()
-        elif content.startswith("```"):
-            content = content[3:].strip()
-
-        match = re.search(r'\{.*', content, re.DOTALL)
-        if match:
-            fixed = try_fix_partial_json(match.group(0))
-            if fixed:
-                return fixed
-
-        logger.warning("⚠️ Ответ не содержит валидного JSON. Ответ: %s", content)
-        return None
-
-    except Exception as e:
-        logger.exception("Ошибка при получении ответа от RunPod OpenAI API")
+    except Exception as exc:
+        logger.exception("Ошибка structured-запроса: %s", exc)
         return None
